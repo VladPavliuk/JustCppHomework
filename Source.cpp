@@ -422,7 +422,7 @@ void main()
 			leftPart = isWide ? AppendToString(leftPart, "word ") : AppendToString(leftPart, "byte ");
 
 			int immediateValue = 0;
-			memcpy(&immediateValue, instructionsBuffer + byteIndex + 2, isWide ? 2 : 1);
+			memcpy(&immediateValue, instructionsBuffer + byteIndex, isWide ? 2 : 1);
 			char* immediateValueStr = WriteDecimalNumberToBuffer((int)abs(immediateValue));
 			byteIndex += isWide ? 2 : 1;
 
