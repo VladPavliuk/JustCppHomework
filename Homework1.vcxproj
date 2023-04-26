@@ -134,6 +134,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="decoded_asm.asm" />
+    <None Include="original_asm_2.asm" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

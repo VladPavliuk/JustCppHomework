@@ -2,6 +2,64 @@
 #include <malloc.h>
 #include <windows.h>
 
+#define i8 char
+
+//struct HashSet
+//{
+//	char* _data;
+//	int _maxLength;
+//
+//	HashSet()
+//	{
+//		_maxLength = 10;
+//		_data = (char*)malloc(_maxLength * sizeof(int));
+//	}
+//
+//	void Set(int key, int value)
+//	{
+//		key % _maxLength;
+//	}
+//};
+
+struct Tuple
+{
+	int first;
+	int second;
+};
+
+struct DynamicArray
+{
+	char* _data;
+	int _maxElementsCount;
+	int _latestElementIndex;
+	int _singleElementSize;
+
+	DynamicArray(int initMaxElementsCount, int singleElementSize)
+	{
+		_singleElementSize = singleElementSize;
+		_latestElementIndex = 0;
+		_maxElementsCount = initMaxElementsCount;
+		_data = (char*)malloc(_singleElementSize * _maxElementsCount);
+	}
+
+	void add(char* elementToAdd)
+	{
+		memcpy(_data + _singleElementSize * _latestElementIndex, elementToAdd, _singleElementSize);
+		_latestElementIndex++;
+
+		if (_latestElementIndex >= _maxElementsCount)
+		{
+			_maxElementsCount *= 1.5;
+			_data = (char*)realloc(_data, _singleElementSize * _maxElementsCount);
+		}
+	}
+
+	void replaceByIndex(char* element, int index)
+	{
+		memcpy(_data + _singleElementSize * index, element, _singleElementSize);
+	}
+};
+
 const char AL[] = "al";
 const char AX[] = "ax";
 const char CL[] = "cl";
@@ -58,6 +116,15 @@ char* AppendToString(const char* initString, char* stringToAppend)
 	free(stringToAppend);
 
 	return newStr;
+}
+
+char* AllocateString(const char* strToAllocate)
+{
+	int strToAllocateLength = strlen(strToAllocate);
+	char* str = (char*)malloc(strToAllocateLength + 1);
+	memcpy(str, strToAllocate, strToAllocateLength);
+	str[strToAllocateLength] = '\0';
+	return str;
 }
 
 char* AllocateEmptyString()
@@ -230,10 +297,281 @@ char* WriteDecimalNumberToBuffer(int valueToWrite)
 	return strNumber;
 }
 
+char* ImmediateToRegOrMemoryCommand(
+	char* command,
+	int* currentByteIndex,
+	char* instructionsBuffer,
+	bool hasSigned)
+{
+	unsigned char firstByte = instructionsBuffer[*currentByteIndex];
+	unsigned char secondByte = instructionsBuffer[*currentByteIndex + 1];
+
+	char* leftPart = AllocateEmptyString();
+	char* rightPart = AllocateEmptyString();
+
+	bool isWide = (firstByte & 0b00000001) == 0b00000001;
+	char modPart = (secondByte & 0b11000000) >> 6;
+	char rmPart = (secondByte & 0b00000111);
+
+	if (modPart == 0b11) // to register
+	{
+		rightPart = AppendToString(rightPart, DecodeRegisterName(rmPart, isWide));
+		*currentByteIndex += 2;
+	}
+	else if (modPart == 0b00) // effective address (no displacement)
+	{
+		if (rmPart == 0b110) // direct memory
+		{
+			int directAddress = *(short*)(instructionsBuffer + *currentByteIndex + 2);
+			char* directAddressStr = WriteDecimalNumberToBuffer(directAddress);
+
+			rightPart = WrapStringWithSymbols(directAddressStr, '[', ']');
+			*currentByteIndex += 4;
+		}
+		else
+		{
+			const char* effectiveAddressFormula = DecodeEffectiveAddressFormulas(rmPart);
+			rightPart = WrapStringWithSymbols(effectiveAddressFormula, '[', ']');
+			*currentByteIndex += 2;
+		}
+	}
+	else if (modPart == 0b01) // effective address (8 bit)
+	{
+		const char* effectiveAddressFormula = DecodeEffectiveAddressFormulas(rmPart);
+
+		char displacementValue = *(char*)(instructionsBuffer + *currentByteIndex + 2);
+		char* strNumber = WriteDecimalNumberToBuffer((int)abs(displacementValue));
+
+		char* eAF1 = AppendToString(effectiveAddressFormula, displacementValue < 0 ? " - " : " + ");
+		char* eAF2 = AppendToString(eAF1, strNumber);
+		rightPart = WrapStringWithSymbols(eAF2, '[', ']');
+
+		*currentByteIndex += 1;
+	}
+	else if (modPart == 0b10) // effective address (16 bit)
+	{
+		const char* effectiveAddressFormula = DecodeEffectiveAddressFormulas(rmPart);
+
+		short displacementValue = *(short*)(instructionsBuffer + *currentByteIndex + 2);
+		char* strNumber = WriteDecimalNumberToBuffer((int)abs(displacementValue));
+
+		char* eAF1 = AppendToString(effectiveAddressFormula, displacementValue < 0 ? " - " : " + ");
+		char* eAF2 = AppendToString(eAF1, strNumber);
+		rightPart = WrapStringWithSymbols(eAF2, '[', ']');
+
+		*currentByteIndex += 4;
+	}
+
+	if (modPart == 0b00 || modPart == 0b01 || modPart == 0b10)
+	{
+		leftPart = isWide ? AppendToString(leftPart, "word ") : AppendToString(leftPart, "byte ");
+	}
+
+	if (hasSigned)
+	{
+		bool isSigned = (firstByte & 0b00000010) == 0b00000010;
+
+		int immediateValue = (!isSigned && isWide)
+			? *(short*)(instructionsBuffer + *currentByteIndex)
+			: *(char*)(instructionsBuffer + *currentByteIndex);
+
+		char* immediateValueStr = WriteDecimalNumberToBuffer(immediateValue);
+
+		*currentByteIndex += (!isSigned && isWide) ? 2 : 1;
+		leftPart = AppendToString(leftPart, immediateValueStr);
+	}
+	else
+	{
+		int immediateValue = 0;
+		memcpy(&immediateValue, instructionsBuffer + *currentByteIndex, isWide ? 2 : 1);
+		char* immediateValueStr = WriteDecimalNumberToBuffer((int)abs(immediateValue));
+		*currentByteIndex += isWide ? 2 : 1;
+		leftPart = AppendToString(leftPart, immediateValueStr);
+	}
+
+	command = AppendToString(command, rightPart);
+	command = AppendToString(command, ", ");
+	command = AppendToString(command, leftPart);
+
+	return command;
+}
+
+char* RegMemoryCommand(char* command, int* currentByteIndex, char* instructionsBuffer)
+{
+	unsigned char firstByte = instructionsBuffer[*currentByteIndex];
+	unsigned char secondByte = instructionsBuffer[*currentByteIndex + 1];
+
+	char* destinationPart = AllocateEmptyString();
+	char* sourcePart = AllocateEmptyString();
+
+	bool isDestinationSwitched = (firstByte & 0b00000010) == 0b00000010;
+	bool isWide = (firstByte & 0b00000001) == 0b00000001;
+
+	char modFlag = (secondByte & 0b11000000) >> 6;
+	char regFlag = (secondByte & 0b00111000) >> 3;
+	char rmFlag = secondByte & 0b00000111;
+
+	sourcePart = AppendToString(sourcePart, DecodeRegisterName(regFlag, isWide));
+	switch (modFlag)
+	{
+	case 0b00:
+	{
+		if (rmFlag == 0b110)
+		{
+			short immediateValue = *(short*)(instructionsBuffer + *currentByteIndex + 2);
+			char* strNumber = WriteDecimalNumberToBuffer((int)abs(immediateValue));
+			destinationPart = AppendToString(destinationPart, WrapStringWithSymbols(strNumber, '[', ']'));
+
+			*currentByteIndex += 4;
+		}
+		else
+		{
+			const char* effectiveAddressFormula = DecodeEffectiveAddressFormulas(rmFlag);
+
+			destinationPart = AppendToString(destinationPart, WrapStringWithSymbols(effectiveAddressFormula, '[', ']'));
+			*currentByteIndex += 2;
+		}
+		break;
+	}
+	case 0b01:
+	{
+		const char* effectiveAddressFormula = DecodeEffectiveAddressFormulas(rmFlag);
+		int formulaLength = strlen(effectiveAddressFormula);
+
+		char immediateValue = *(instructionsBuffer + *currentByteIndex + 2);
+		char* strNumber = WriteDecimalNumberToBuffer((int)abs(immediateValue));
+
+		char* eAF1 = AppendToString(effectiveAddressFormula, immediateValue < 0 ? " - " : " + ");
+		char* eAF2 = AppendToString(eAF1, strNumber);
+		destinationPart = AppendToString(destinationPart, WrapStringWithSymbols(eAF2, '[', ']'));
+
+		*currentByteIndex += 3;
+		break;
+	}
+	case 0b10:
+	{
+		const char* effectiveAddressFormula = DecodeEffectiveAddressFormulas(rmFlag);
+		int formulaLength = strlen(effectiveAddressFormula);
+
+		short immediateValue = *(short*)(instructionsBuffer + *currentByteIndex + 2);
+		char* strNumber = WriteDecimalNumberToBuffer((int)abs(immediateValue));
+
+		char* eAF1 = AppendToString(effectiveAddressFormula, immediateValue < 0 ? " - " : " + ");
+		char* eAF2 = AppendToString(eAF1, strNumber);
+		destinationPart = AppendToString(destinationPart, WrapStringWithSymbols(eAF2, '[', ']'));
+
+		*currentByteIndex += 4;
+		break;
+	}
+	case 0b11:
+	{
+		destinationPart = AppendToString(destinationPart, DecodeRegisterName(rmFlag, isWide));
+
+		*currentByteIndex += 2;
+		break;
+	}
+	}
+
+	if (isDestinationSwitched)
+	{
+		char* tmpStr;
+		tmpStr = destinationPart;
+		destinationPart = sourcePart;
+		sourcePart = tmpStr;
+	}
+
+	command = AppendToString(command, destinationPart);
+	command = AppendToString(command, ", ");
+	command = AppendToString(command, sourcePart);
+
+	return command;
+}
+
+char* ImmediateToRegCommand(char* command, int* currentByteIndex, char* instructionsBuffer)
+{
+	unsigned char firstByte = instructionsBuffer[*currentByteIndex];
+	unsigned char secondByte = instructionsBuffer[*currentByteIndex + 1];
+
+	bool isWide = (firstByte & 0b00001000) == 0b00001000;
+	char regFlag = firstByte & 0b00000111;
+
+	const char* registerName = DecodeRegisterName(regFlag, isWide);
+
+	int immediateValue = isWide
+		? *(short*)(instructionsBuffer + *currentByteIndex + 1)
+		: *(char*)(instructionsBuffer + *currentByteIndex + 1);
+	char* immediateValueStr = WriteDecimalNumberToBuffer((int)immediateValue);
+	*currentByteIndex += isWide ? 3 : 2;
+
+	command = AppendToString(command, registerName);
+	command = AppendToString(command, ", ");
+	command = AppendToString(command, immediateValueStr);
+
+	return command;
+}
+
+char* ImmediateToAccumulatorCommand(char* command, int* currentByteIndex, char* instructionsBuffer)
+{
+	unsigned char firstByte = instructionsBuffer[*currentByteIndex];
+	unsigned char secondByte = instructionsBuffer[*currentByteIndex + 1];
+
+	bool isWide = (firstByte & 0b00000001) == 0b00000001;
+
+	const char* registerName = isWide ? "ax" : "al";
+
+	int immediateValue = isWide
+		? *(short*)(instructionsBuffer + *currentByteIndex + 1)
+		: *(char*)(instructionsBuffer + *currentByteIndex + 1);
+	char* immediateValueStr = WriteDecimalNumberToBuffer(immediateValue);
+	*currentByteIndex += isWide ? 3 : 2;
+
+	command = AppendToString(command, registerName);
+	command = AppendToString(command, ", ");
+	command = AppendToString(command, immediateValueStr);
+
+	return command;
+}
+
+char* AddStringToBuffer(
+	char* buffer,
+	char* strToAppend,
+	int* currentBufferIndex,
+	int* maxBufferSize)
+{
+	int strSize = strlen(strToAppend) * sizeof(char);
+	*currentBufferIndex += strSize;
+
+	while (*currentBufferIndex >= *maxBufferSize)
+	{
+		*maxBufferSize *= 1.5;
+		buffer = (char*)realloc(buffer, *maxBufferSize);
+	}
+
+	memcpy(buffer + *currentBufferIndex - strSize, strToAppend, strlen(strToAppend) * sizeof(char));
+
+	return buffer;
+}
+
+void InsertStringIntoBuffer(int indexToInsert,
+	char* stringToInsert,
+	char** buffer,
+	int* bufferSize)
+{
+	int stringSize = strlen(stringToInsert);
+	char* newBuffer = (char*)malloc(*bufferSize + stringSize);
+
+	memcpy(newBuffer, *buffer, indexToInsert);
+	memcpy(newBuffer + indexToInsert, stringToInsert, stringSize);
+	memcpy(newBuffer + indexToInsert + stringSize, *buffer + indexToInsert,
+		*bufferSize - indexToInsert);
+
+	*bufferSize += stringSize;
+	free(*buffer);
+	*buffer = newBuffer;
+}
+
 void main()
 {
-	const char commaSpace[] = ", ";
-
 	FILE* asmFile;
 	int err = fopen_s(&asmFile, "./original_asm", "rb");
 	fseek(asmFile, 0L, SEEK_END);
@@ -248,196 +586,116 @@ void main()
 	FILE* decodedFile;
 	fopen_s(&decodedFile, "decoded_asm.asm", "w+");
 
-	const char fileHeader[] = "bits 16\n\n";
-	fwrite(&fileHeader, strlen(fileHeader) * sizeof(char), 1, decodedFile);
+	int maxDecodedFileBufferSize = 2;
+	DynamicArray decodedCommands = DynamicArray(10, sizeof(char*));
+	DynamicArray commandsAddresses = DynamicArray(10, sizeof(int));
+
+	// TODO: probably it's better to replace it by dynamic array
+	int addressesToJump[100];
+	int latestAddedAddressIndex = 0;
+	for (int i = 0; i < 100; i++) addressesToJump[i] = -1;
+
+	// opcodes
+	char movOpcode = 0b100010;
+	char immediateToRegistryMovOpcode = 0b1011;
+	char immediateToRegistryMemoryMovOpcode = 0b1100011;
+	char accumulatorToMemoryMovOpcode = 0b1010001;
+	char memoryToAccumulatorMovOpcode = 0b1010000;
+
+	char addRegMemoryWithRegisterToEither = 0b000000;
+	char addImmediateToRegisterOrMemory = 0b100000;
+	char addImmediateToAccumulator = 0b0000010;
+
+	char subRegMemoryWithRegisterToEither = 0b001010;
+	char subImmediateToRegisterOrMemory = 0b100000;
+	char subImmediateToAccumulator = 0b0010110;
+
+	char cmpRegMemoryWithRegisterToEither = 0b001110;
+	char cmpImmediateToRegisterOrMemory = 0b100000;
+	char cmpImmediateToAccumulator = 0b0011110;
+
+	char jumpOnNotEqual = 0b01110101;
 
 	int byteIndex = 0;
+	DynamicArray jumpAddressMap = DynamicArray(10, sizeof(Tuple));
+
 	while (byteIndex < fileLength)
 	{
+		commandsAddresses.add((char*)&byteIndex);
+
 		unsigned char firstByte = instructionsBuffer[byteIndex];
 		unsigned char secondByte = instructionsBuffer[byteIndex + 1];
 
-		// opcodes
-		char movOpcode = 0b100010;
-		char immediateToRegistryMovOpcode = 0b1011;
-		char immediateToRegistryMemoryMovOpcode = 0b1100011;
-		char accumulatorToMemoryMovOpcode = 0b1010001;
-		char memoryToAccumulatorMovOpcode = 0b1010000;
+		char regFlag = (secondByte & 0b00111000) >> 3;
 
-		if ((movOpcode ^ (unsigned char)(firstByte >> 2)) == 0)
+		char* command = AllocateEmptyString();
+		// add
+		if (addRegMemoryWithRegisterToEither == (firstByte >> 2))
 		{
-			const char movOpName[] = "mov ";
-			fwrite(&movOpName, strlen(movOpName) * sizeof(char), 1, decodedFile);
-			char* leftPart = AllocateEmptyString();
-			char* rightPart = AllocateEmptyString();
-
-			bool isWide = ((firstByte & 0b00000001) ^ 0b00000001) == 0;
-			bool isDestinationSwiched = ((firstByte & 0b00000010) ^ 0b00000010) == 0;
-
-			// if it's store to RAM from register "destination" should be 0
-			char modPart = secondByte & 0b11000000;
-			// mod field tells whatever we have dress displacement in source or destination
-
-			char regFlag = (secondByte & 0b00111000) >> 3;
-			char rmFlag = secondByte & 0b00000111;
-			// rm holds the "equation" part for effective address calculation if present
-
-			leftPart = AppendToString(leftPart, DecodeRegisterName(regFlag, isWide));
-			if (modPart == (char)0b11000000) // register to register
-			{
-				rightPart = AppendToString(rightPart, DecodeRegisterName(rmFlag, isWide));
-
-				byteIndex += 2;
-			}
-			else if (modPart == (char)0b00000000) // no displacement
-			{
-				if (rmFlag == 0b110) // rm = 110, then 16-bit displacement follows (direct address mode)
-				{
-					short immediateValue = *(short*)(instructionsBuffer + byteIndex + 2);
-					char* strNumber = WriteDecimalNumberToBuffer((int)abs(immediateValue));
-					rightPart = AppendToString(rightPart, WrapStringWithSymbols(strNumber, '[', ']'));
-
-					byteIndex += 4;
-				}
-				else
-				{
-					const char* effectiveAddressFormula = DecodeEffectiveAddressFormulas(rmFlag);
-
-					rightPart = AppendToString(rightPart, WrapStringWithSymbols(effectiveAddressFormula, '[', ']'));
-					byteIndex += 2;
-				}
-			}
-			else if (modPart == (char)0b01000000) // 8 bit displacement
-			{
-				const char* effectiveAddressFormula = DecodeEffectiveAddressFormulas(rmFlag);
-				int formulaLength = strlen(effectiveAddressFormula);
-
-				char immediateValue = *(instructionsBuffer + byteIndex + 2);
-				char* strNumber = WriteDecimalNumberToBuffer((int)abs(immediateValue));
-
-				char* eAF1 = AppendToString(effectiveAddressFormula, immediateValue < 0 ? " - " : " + ");
-				char* eAF2 = AppendToString(eAF1, strNumber);
-				rightPart = AppendToString(rightPart, WrapStringWithSymbols(eAF2, '[', ']'));
-
-				byteIndex += 3;
-			}
-			else if (modPart == (char)0b10000000) // 16 bit displacement
-			{
-				const char* effectiveAddressFormula = DecodeEffectiveAddressFormulas(rmFlag);
-				int formulaLength = strlen(effectiveAddressFormula);
-
-				short immediateValue = *(short*)(instructionsBuffer + byteIndex + 2);
-				char* strNumber = WriteDecimalNumberToBuffer((int)abs(immediateValue));
-
-				char* eAF1 = AppendToString(effectiveAddressFormula, immediateValue < 0 ? " - " : " + ");
-				char* eAF2 = AppendToString(eAF1, strNumber);
-				rightPart = AppendToString(rightPart, WrapStringWithSymbols(eAF2, '[', ']'));
-
-				byteIndex += 4;
-			}
-
-			if (isDestinationSwiched)
-			{
-				char* tmpStr;
-				tmpStr = leftPart;
-				leftPart = rightPart;
-				rightPart = tmpStr;
-			}
-
-			fwrite(rightPart, strlen(rightPart), 1, decodedFile);
-			fwrite(&commaSpace, strlen(commaSpace) * sizeof(char), 1, decodedFile);
-			fwrite(leftPart, strlen(leftPart), 1, decodedFile);
-			free(leftPart);
-			free(rightPart);
+			command = AppendToString(command, "add ");
+			command = RegMemoryCommand(command, &byteIndex, instructionsBuffer);
+		}
+		else if (addImmediateToRegisterOrMemory == (firstByte >> 2) && (regFlag == 0b000))
+		{
+			command = AppendToString(command, "add ");
+			command = ImmediateToRegOrMemoryCommand(command, &byteIndex, instructionsBuffer, true);
+		}
+		else if (addImmediateToAccumulator == (firstByte >> 1))
+		{
+			command = AppendToString(command, "add ");
+			command = ImmediateToAccumulatorCommand(command, &byteIndex, instructionsBuffer);
+		}
+		// sub
+		else if (subRegMemoryWithRegisterToEither == (firstByte >> 2))
+		{
+			command = AppendToString(command, "sub ");
+			command = RegMemoryCommand(command, &byteIndex, instructionsBuffer);
+		}
+		else if (subImmediateToRegisterOrMemory == (firstByte >> 2) && (regFlag == 0b101))
+		{
+			command = AppendToString(command, "sub ");
+			command = ImmediateToRegOrMemoryCommand(command, &byteIndex, instructionsBuffer, true);
+		}
+		else if (subImmediateToAccumulator == (firstByte >> 1))
+		{
+			command = AppendToString(command, "sub ");
+			command = ImmediateToAccumulatorCommand(command, &byteIndex, instructionsBuffer);
+		}
+		// cmp
+		else if (cmpRegMemoryWithRegisterToEither == (firstByte >> 2))
+		{
+			command = AppendToString(command, "cmp ");
+			command = RegMemoryCommand(command, &byteIndex, instructionsBuffer);
+		}
+		else if (cmpImmediateToRegisterOrMemory == (firstByte >> 2) && (regFlag == 0b111))
+		{
+			command = AppendToString(command, "cmp ");
+			command = ImmediateToRegOrMemoryCommand(command, &byteIndex, instructionsBuffer, true);
+		}
+		else if (cmpImmediateToAccumulator == (firstByte >> 1))
+		{
+			command = AppendToString(command, "cmp ");
+			command = ImmediateToAccumulatorCommand(command, &byteIndex, instructionsBuffer);
+		}
+		// mov
+		else if (movOpcode == (firstByte >> 2))
+		{
+			command = AppendToString(command, "mov ");
+			command = RegMemoryCommand(command, &byteIndex, instructionsBuffer);
 		}
 		else if ((immediateToRegistryMovOpcode ^ (unsigned char)(firstByte >> 4)) == 0)
 		{
-			const char movOpName[] = "mov ";
-			fwrite(&movOpName, strlen(movOpName) * sizeof(char), 1, decodedFile);
-
-			bool isWide = (firstByte & 0b00001000) == 0b00001000;
-			char regFlag = firstByte & 0b00000111;
-
-			const char* registerName = DecodeRegisterName(regFlag, isWide);
-
-			int immediateValue = isWide
-				? *(short*)(instructionsBuffer + byteIndex + 1)
-				: *(char*)(instructionsBuffer + byteIndex + 1);
-			char* immediateValueStr = WriteDecimalNumberToBuffer((int)immediateValue);
-			byteIndex += isWide ? 3 : 2;
-
-			fwrite(registerName, 2 * sizeof(char), 1, decodedFile);
-			fwrite(&commaSpace, strlen(commaSpace) * sizeof(char), 1, decodedFile);
-			fwrite(immediateValueStr, strlen(immediateValueStr), 1, decodedFile);
+			command = AppendToString(command, "mov ");
+			command = ImmediateToRegCommand(command, &byteIndex, instructionsBuffer);
 		}
 		else if ((immediateToRegistryMemoryMovOpcode ^ (unsigned char)(firstByte >> 1)) == 0)
 		{
-			char* leftPart = AllocateEmptyString();
-			char* rightPart = AllocateEmptyString();
-			const char movOpName[] = "mov ";
-			fwrite(&movOpName, strlen(movOpName) * sizeof(char), 1, decodedFile);
-
-			bool isWide = (firstByte & 0b00000001) == 0b00000001;
-			char modPart = (secondByte & 0b11000000) >> 6;
-			char rmPart = (secondByte & 0b00000111);
-
-			if (modPart == 0b11) // to register
-			{
-				printf("");
-
-			}
-			else if (modPart == 0b00) // effective address (no displacement)
-			{
-				const char* effectiveAddressFormula = DecodeEffectiveAddressFormulas(rmPart);
-				rightPart = WrapStringWithSymbols(effectiveAddressFormula, '[', ']');
-				byteIndex += 2;
-			}
-			else if (modPart == 0b01) // effective address (8 bit)
-			{
-				const char* effectiveAddressFormula = DecodeEffectiveAddressFormulas(rmPart);
-
-				char displacementValue = *(char*)(instructionsBuffer + byteIndex + 2);
-				char* strNumber = WriteDecimalNumberToBuffer((int)abs(displacementValue));
-
-				char* eAF1 = AppendToString(effectiveAddressFormula, " + ");
-				char* eAF2 = AppendToString(eAF1, strNumber);
-				rightPart = WrapStringWithSymbols(eAF2, '[', ']');
-
-				byteIndex += 1;
-			}
-			else if (modPart == 0b10) // effective address (16 bit)
-			{
-				const char* effectiveAddressFormula = DecodeEffectiveAddressFormulas(rmPart);
-
-				short displacementValue = *(short*)(instructionsBuffer + byteIndex + 2);
-				char* strNumber = WriteDecimalNumberToBuffer((int)abs(displacementValue));
-
-				char* eAF1 = AppendToString(effectiveAddressFormula, " + ");
-				char* eAF2 = AppendToString(eAF1, strNumber);
-				rightPart = WrapStringWithSymbols(eAF2, '[', ']');
-
-				byteIndex += 4;
-			}
-
-			leftPart = isWide ? AppendToString(leftPart, "word ") : AppendToString(leftPart, "byte ");
-
-			int immediateValue = 0;
-			memcpy(&immediateValue, instructionsBuffer + byteIndex, isWide ? 2 : 1);
-			char* immediateValueStr = WriteDecimalNumberToBuffer((int)abs(immediateValue));
-			byteIndex += isWide ? 2 : 1;
-
-			leftPart = AppendToString(leftPart, immediateValueStr);
-
-			fwrite(rightPart, strlen(rightPart), 1, decodedFile);
-			fwrite(&commaSpace, strlen(commaSpace) * sizeof(char), 1, decodedFile);
-			fwrite(leftPart, strlen(leftPart), 1, decodedFile);
-			free(leftPart);
-			free(rightPart);
+			command = AppendToString(command, "mov ");
+			command = ImmediateToRegOrMemoryCommand(command, &byteIndex, instructionsBuffer, false);
 		}
 		else if (memoryToAccumulatorMovOpcode == (char)(firstByte >> 1))
 		{
-			const char movOpName[] = "mov ";
-			fwrite(&movOpName, strlen(movOpName) * sizeof(char), 1, decodedFile);
+			command = AppendToString(command, "mov ");
 
 			bool isWide = (firstByte & 0b00000001) == 0b00000001;
 
@@ -451,14 +709,13 @@ void main()
 
 			byteIndex += isWide ? 3 : 2;
 
-			fwrite(registerName, strlen(registerName), 1, decodedFile);
-			fwrite(&commaSpace, strlen(commaSpace) * sizeof(char), 1, decodedFile);
-			fwrite(immediateValueStr, strlen(immediateValueStr), 1, decodedFile);
+			command = AppendToString(command, registerName);
+			command = AppendToString(command, ", ");
+			command = AppendToString(command, immediateValueStr);
 		}
 		else if (accumulatorToMemoryMovOpcode == (char)(firstByte >> 1))
 		{
-			const char movOpName[] = "mov ";
-			fwrite(&movOpName, strlen(movOpName) * sizeof(char), 1, decodedFile);
+			command = AppendToString(command, "mov ");
 
 			bool isWide = (firstByte & 0b00000001) == 0b00000001;
 
@@ -472,9 +729,65 @@ void main()
 
 			byteIndex += isWide ? 3 : 2;
 
-			fwrite(immediateValueStr, strlen(immediateValueStr), 1, decodedFile);
-			fwrite(&commaSpace, strlen(commaSpace) * sizeof(char), 1, decodedFile);
-			fwrite(registerName, strlen(registerName), 1, decodedFile);
+			command = AppendToString(command, immediateValueStr);
+			command = AppendToString(command, ", ");
+			command = AppendToString(command, registerName);
+		}
+		else if (jumpOnNotEqual == firstByte)
+		{
+			char secondByte = instructionsBuffer[byteIndex + 1];
+			byteIndex += 2;
+			int addressToJump = byteIndex + secondByte;
+
+			//> Was address already added
+			bool addressAlreadyAdded = false;
+			for (int i = 0; i <= latestAddedAddressIndex; i++)
+			{
+				if (addressesToJump[i] == addressToJump)
+				{
+					addressAlreadyAdded = true;
+					break;
+				}
+			}
+
+			if (!addressAlreadyAdded)
+			{
+				addressesToJump[latestAddedAddressIndex] = addressToJump;
+				latestAddedAddressIndex++;
+			}
+			//<
+
+			//> sort Addresses
+			for (int i = 0; i < latestAddedAddressIndex; i++)
+			{
+				for (int j = i; j < latestAddedAddressIndex; j++)
+				{
+					if (addressesToJump[j] < addressesToJump[i])
+					{
+						int tmp = addressesToJump[i];
+						addressesToJump[i] = addressesToJump[j];
+						addressesToJump[j] = tmp;
+					}
+				}
+			}
+			//<
+
+			//> find index of address after it was sorted
+			int addressIndex = -1;
+			for (int i = 0; i < latestAddedAddressIndex; i++)
+			{
+				if (addressesToJump[i] == addressToJump)
+				{
+					addressIndex = i;
+					break;
+				}
+			}
+			//<
+
+			command = AppendToString(command, "jnz");
+
+			Tuple tuple = { decodedCommands._latestElementIndex, addressToJump };
+			jumpAddressMap.add((char*)&tuple);
 		}
 		else
 		{
@@ -483,8 +796,62 @@ void main()
 			byteIndex += 2;
 		}
 
-		const char newLine[] = "\n";
-		fwrite(&newLine, strlen(newLine), 1, decodedFile);
+		decodedCommands.add((char*)&command);
+	}
+
+	// add labels to jump instructions
+	for (int i = 0; i < jumpAddressMap._latestElementIndex; i++)
+	{
+		char* labelName = AllocateEmptyString();
+		labelName = AppendToString(labelName, " test_label");
+
+		Tuple jumpAddress = ((Tuple*)jumpAddressMap._data)[i];
+		int jumpCommandIndex = jumpAddress.first;
+		int jumpToAddress = jumpAddress.second;
+
+		for (int j = 0; j < 100; j++)
+		{
+			if (jumpToAddress == addressesToJump[j])
+			{
+				labelName = AppendToString(labelName, WriteDecimalNumberToBuffer(j));
+				break;
+			}
+		}
+
+		char* jumpCommand = ((char**)decodedCommands._data)[jumpCommandIndex];
+		jumpCommand = AppendToString(jumpCommand, labelName);
+
+		decodedCommands.replaceByIndex((char*)&jumpCommand, jumpCommandIndex);
+	}
+
+	// write to decoded file
+	const char* fileHeader = "bits 16\n\n";
+	fwrite(fileHeader, strlen(fileHeader), 1, decodedFile);
+
+	int decodedFileIndex = 0;
+	const char newLine = '\n';
+	int addressesToJumpIndex = 0;
+	for (int i = 0; i < decodedCommands._latestElementIndex; i++)
+	{
+		// labels writing
+		int commandAddress = ((int*)commandsAddresses._data)[i];
+		if (commandAddress == addressesToJump[addressesToJumpIndex])
+		{
+			char* labdelStr = AllocateString("test_label");
+			labdelStr = AppendToString(labdelStr, WriteDecimalNumberToBuffer(addressesToJumpIndex));
+			labdelStr = AppendToString(labdelStr, ":\n");
+
+			fwrite(labdelStr, strlen(labdelStr), 1, decodedFile);
+			addressesToJumpIndex++;
+			free(labdelStr);
+		}
+
+		char* commandStr = ((char**)decodedCommands._data)[i];
+
+		fwrite(commandStr, strlen(commandStr), 1, decodedFile);
+		free(commandStr);
+
+		fwrite(&newLine, 1, 1, decodedFile);
 	}
 
 	fseek(decodedFile, 0L, SEEK_END);

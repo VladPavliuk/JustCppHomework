@@ -28,5 +28,8 @@
     <None Include="decoded_asm.asm">
       <Filter>Source Files</Filter>
     </None>
+    <None Include="original_asm_2.asm">
+      <Filter>Source Files</Filter>
+    </None>
   </ItemGroup>
 </Project>
